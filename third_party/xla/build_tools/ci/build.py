@@ -107,6 +107,7 @@ class BuildType(enum.Enum):
   """
 
   XLA_LINUX_X86_CPU_GITHUB_ACTIONS = enum.auto()
+  XLA_WINDOWS_X86_CPU_GITHUB_ACTIONS = enum.auto()
   XLA_LINUX_X86_CPU_BZLMOD_GITHUB_ACTIONS = enum.auto()
   XLA_LINUX_ARM64_CPU_GITHUB_ACTIONS = enum.auto()
   XLA_LINUX_X86_GPU_L4_GITHUB_ACTIONS = enum.auto()
@@ -238,7 +239,10 @@ class Build:
         self.type_ == BuildType.XLA_MACOS_X86_CPU_KOKORO
         or self.type_ == BuildType.XLA_MACOS_ARM64_CPU_KOKORO
     )
-    windows_build = (self.type_ == BuildType.JAX_WINDOWS_X86_CPU_GITHUB_ACTIONS)
+    windows_build = (
+        self.type_ == BuildType.JAX_WINDOWS_X86_CPU_GITHUB_ACTIONS
+        or self.type_ == BuildType.XLA_WINDOWS_X86_CPU_GITHUB_ACTIONS
+    )
     if not (macos_build or windows_build):
       cmds.append(
           retry(
@@ -321,6 +325,48 @@ Build(
     build_tag_filters=cpu_x86_tag_filter,
     test_tag_filters=cpu_x86_tag_filter,
     options={**_DEFAULT_BAZEL_OPTIONS, "//xla/tsl:ci_build": True},
+)
+
+# common:windows_x86_cpu_2022_pycpp_test_build_opts \
+# --copt=/d2ReducedOptimizeHugeFunctions \
+# --host_copt=/d2ReducedOptimizeHugeFunctions --dynamic_mode=off
+
+windows_x86_tag_filter = (
+    "-no_windows",
+    "-windows_excluded",
+    "-no_oss",
+    "-tf_tosa",
+    "-oss_excluded",
+    "-gpu",
+    "-tpu",
+    "-benchmark-test",
+    "-v1only",
+)
+
+Build(
+    type_=BuildType.XLA_WINDOWS_X86_CPU_GITHUB_ACTIONS,
+    repo="openxla/xla",
+    configs=(
+        "warnings",
+        "nonccl",
+        "rbe_xla_windows_x86_cpu_2022",
+    ),
+    target_patterns=(
+        "//xla/...",
+        "//build_tools/...",
+        "@local_tsl//tsl/...",
+        "-//xla/hlo/experimental/...",
+    ),
+    build_tag_filters=windows_x86_tag_filter,
+    test_tag_filters=windows_x86_tag_filter,
+    options={
+        **_DEFAULT_BAZEL_OPTIONS,
+        "//xla/tsl:ci_build": True,
+    },
+    subcommand="build",
+    startup_options={
+        "output_user_root": "C:/x",
+    },
 )
 
 Build(
