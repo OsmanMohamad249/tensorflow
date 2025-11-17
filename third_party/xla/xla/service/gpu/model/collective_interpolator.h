@@ -56,23 +56,51 @@ class CollectiveInterpolator {
 
   struct ExactInterpolatorKey {
     HloOpcode opcode;
-    CollectiveDeviceList device_list;
+    // For non-permute collectives, device_list is used.
+    std::optional<CollectiveDeviceList> device_list;
+    // For collective-permute, permute_type is used instead.
+    std::optional<CollectivePermuteCostModelType> permute_type;
     std::optional<PrimitiveType> data_type;
 
     template <typename H>
     friend H AbslHashValue(H h, const ExactInterpolatorKey& key) {
-      return H::combine(
-          std::move(h), key.opcode,
-          key.device_list.ToString(/*print_full_replica_group_list=*/true),
-          key.data_type);
+      h = H::combine(std::move(h), key.opcode, key.data_type);
+      switch (key.opcode) {
+        case HloOpcode::kCollectivePermute: {
+          CHECK(key.permute_type.has_value());
+          h = H::combine(std::move(h), key.permute_type.value());
+          break;
+        }
+        default: {
+          CHECK(key.device_list.has_value());
+          h = H::combine(std::move(h),
+                         key.device_list->ToString(
+                             /*print_full_replica_group_list=*/true));
+          break;
+        }
+      }
+      return h;
     }
 
     bool operator==(const ExactInterpolatorKey& other) const {
-      return opcode == other.opcode &&
-             device_list.ToString(/*print_full_replica_group_list=*/true) ==
-                 other.device_list.ToString(
-                     /*print_full_replica_group_list=*/true) &&
-             data_type == other.data_type;
+      if (opcode != other.opcode || permute_type != other.permute_type ||
+          device_list != other.device_list) {
+        return false;
+      }
+      // For permute, ignore device_list and rely on permute_type.
+      switch (opcode) {
+        case HloOpcode::kCollectivePermute: {
+          return permute_type.has_value() && other.permute_type.has_value() &&
+                 permute_type == other.permute_type;
+        }
+        default: {
+          return device_list.has_value() && other.device_list.has_value() &&
+                 device_list->ToString(
+                     /*print_full_replica_group_list=*/true) ==
+                     other.device_list->ToString(
+                         /*print_full_replica_group_list=*/true);
+        }
+      }
     }
   };
 
@@ -97,9 +125,10 @@ class CollectiveInterpolator {
   static std::unique_ptr<HloModule> ConstructModule(
       const HloInstructionProfile& profile);
 
-  // Returns the estimated runtime for a supported `collective`.
+  // Returns the estimated runtime for a supported `collective` or
+  // `collective-permute`.
   absl::StatusOr<absl::Duration> EstimatedRuntime(
-      const HloCollectiveInstruction& instr) const;
+      const HloInstruction& instr) const;
 
  private:
   explicit CollectiveInterpolator(
@@ -114,6 +143,10 @@ class CollectiveInterpolator {
         analysis_(analysis) {}
 
   ExactInterpolatorMap exact_interpolators_;
+  // Fallback interpolators are only necessary for collective with complex
+  // dimensions, e.g. async all-reduce, reduce-scatter, etc.
+  // collective-permute doesn't need fallback interpolators as its relative
+  // cost is negligible compared to data transfer.
   FallbackInterpolatorMap fallback_interpolators_;
   const se::DeviceDescription& device_info_;
   int num_devices_per_host_;
