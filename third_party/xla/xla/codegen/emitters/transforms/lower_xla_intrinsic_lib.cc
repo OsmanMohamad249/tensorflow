@@ -11,6 +11,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -20,12 +21,13 @@ limitations under the License.
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Vector/Utils/VectorUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Types.h"
@@ -39,10 +41,10 @@ limitations under the License.
 #include "xla/codegen/intrinsic/erf.h"
 #include "xla/codegen/intrinsic/exp.h"
 #include "xla/codegen/intrinsic/fptrunc.h"
-#include "xla/codegen/intrinsic/intrinsic.h"
 #include "xla/codegen/intrinsic/log1p.h"
 #include "xla/codegen/intrinsic/rsqrt.h"
 #include "xla/codegen/intrinsic/tanh.h"
+#include "xla/codegen/intrinsic/type.h"
 
 namespace xla {
 namespace emitters {
@@ -84,13 +86,28 @@ class LowerErfPattern : public mlir::OpRewritePattern<mlir::math::ErfOp> {
 
   mlir::LogicalResult matchAndRewrite(
       mlir::math::ErfOp op, mlir::PatternRewriter& rewriter) const override {
-    mlir::Type type = op.getType();
+    auto type = op.getType();
+    mlir::Type element_type = mlir::getElementTypeOrSelf(op.getType());
+    auto maybe_vector_type = mlir::dyn_cast<mlir::VectorType>(type);
+
+    if (maybe_vector_type && maybe_vector_type.getRank() != 1) {
+      return rewriter.notifyMatchFailure(op, "Vector rank is not 1.");
+    }
+
+    // Get the vectorized version of the given type if op has a vector type,
+    // else just return the given type.
+    auto get_vector_type = [&maybe_vector_type](mlir::Type type) -> mlir::Type {
+      if (maybe_vector_type) {
+        return maybe_vector_type.clone(type);
+      }
+      return type;
+    };
 
     // Extend the argument to f32 and truncate the result back unconditionally
     // as these will be cleaned up later if they are already f32.
-    if (type.isF16() || type.isF32()) {
+    if (element_type.isF16() || element_type.isF32()) {
       mlir::ImplicitLocOpBuilder b(op.getLoc(), rewriter);
-      mlir::Type f32_type = b.getF32Type();
+      mlir::Type f32_type = get_vector_type(b.getF32Type());
 
       mlir::Value input_value =
           b.create<mlir::arith::ExtFOp>(f32_type, op.getOperand());
@@ -106,12 +123,27 @@ class LowerErfPattern : public mlir::OpRewritePattern<mlir::math::ErfOp> {
       return mlir::success();
     }
 
-    if (type.isF64()) {
+    if (element_type.isF64()) {
       mlir::ImplicitLocOpBuilder b(op.getLoc(), rewriter);
 
       auto erf_decl = GetErf64Declaration(rewriter);
-      auto call_op = b.create<mlir::func::CallOp>(erf_decl, op.getOperand());
-      rewriter.replaceOp(op, call_op->getResults());
+
+      if (!maybe_vector_type) {
+        auto call_op = b.create<mlir::func::CallOp>(erf_decl, op.getOperand());
+        rewriter.replaceOp(op, call_op->getResults());
+        return mlir::success();
+      }
+
+      llvm::SmallVector<mlir::Value> scalar_erf_results;
+      for (int64_t idx = 0; idx < maybe_vector_type.getNumElements(); ++idx) {
+        mlir::Value extracted = mlir::vector::ExtractOp::create(
+            rewriter, op.getLoc(), op.getOperand(), idx);
+        mlir::Value scalar_erf =
+            b.create<mlir::func::CallOp>(erf_decl, extracted).getResult(0);
+        scalar_erf_results.push_back(scalar_erf);
+      }
+      rewriter.replaceOpWithNewOp<mlir::vector::FromElementsOp>(
+          op, type, scalar_erf_results);
       return mlir::success();
     }
 
@@ -209,6 +241,38 @@ class LowerIntrinsicPattern : public mlir::OpRewritePattern<Op> {
   mlir::ModuleOp& module_op_;
 };
 
+// Convert a single element vector operation into a extract -> scalar op ->
+// from_elements sequence.
+// This enables correct lowering to XLA intrinsics which don't support
+// single-element vectors.
+template <typename Op>
+class ExpandSingleElementVectorPattern : public mlir::OpRewritePattern<Op> {
+  using mlir::OpRewritePattern<Op>::OpRewritePattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      Op op, mlir::PatternRewriter& rewriter) const override {
+    mlir::VectorType vector_type =
+        mlir::dyn_cast<mlir::VectorType>(op.getType());
+    if (!vector_type) {
+      return rewriter.notifyMatchFailure(op, "Not a vector");
+    }
+
+    if (vector_type.getNumElements() != 1) {
+      return rewriter.notifyMatchFailure(op, "Not a single-element vector");
+    }
+
+    llvm::SmallVector<int64_t> indices(vector_type.getRank(), 0);
+    mlir::Value element = mlir::vector::ExtractOp::create(
+        rewriter, op.getLoc(), op.getOperand(), indices);
+    mlir::Type result_type = mlir::getElementTypeOrSelf(op.getType());
+    mlir::Value result =
+        Op::create(rewriter, op.getLoc(), result_type, element);
+    rewriter.replaceOpWithNewOp<mlir::vector::FromElementsOp>(op, vector_type,
+                                                              result);
+    return mlir::success();
+  };
+};
+
 class LowerXlaIntrinsicLibPass
     : public impl::LowerXlaIntrinsicLibPassBase<LowerXlaIntrinsicLibPass> {
  public:
@@ -218,6 +282,14 @@ class LowerXlaIntrinsicLibPass
   void runOnOperation() override {
     mlir::ModuleOp module_op = getOperation();
     mlir::RewritePatternSet patterns(&getContext());
+    patterns.add<ExpandSingleElementVectorPattern<mlir::math::ExpOp>,
+                 ExpandSingleElementVectorPattern<mlir::math::Log1pOp>,
+                 ExpandSingleElementVectorPattern<mlir::math::RsqrtOp>,
+                 ExpandSingleElementVectorPattern<mlir::math::TanhOp>,
+                 ExpandSingleElementVectorPattern<mlir::math::ErfOp>,
+                 ExpandSingleElementVectorPattern<mlir::arith::TruncFOp>>(
+        &getContext());
+
     patterns.add<
         LowerIntrinsicPattern<codegen::intrinsics::Exp, mlir::math::ExpOp>,
         LowerIntrinsicPattern<codegen::intrinsics::Log1p, mlir::math::Log1pOp>,

@@ -41,6 +41,21 @@ module {
 // -----
 
 module {
+  func.func @exp_f64_vector_1d(%arg0: vector<1xf64>) -> vector<1xf64> {
+    %ret = math.exp %arg0 : vector<1xf64>
+    return %ret : vector<1xf64>
+  }
+}
+
+// CHECK: func @exp_f64_vector_1d
+// CHECK-NOT: math.exp %arg0
+// CHECK: vector.extract
+// CHECK: @local_xla.exp.f64
+// CHECK: vector.from_elements
+
+// -----
+
+module {
   func.func @trunc(%input: f32) -> bf16 {
     %truncated = arith.truncf %input : f32 to bf16
     func.return %truncated : bf16
@@ -81,6 +96,20 @@ module {
 // -----
 
 module {
+  func.func @erf32_vector(%arg0: vector<4xf32>) -> vector<4xf32> {
+    %ret = math.erf %arg0 : vector<4xf32>
+    return %ret : vector<4xf32>
+  }
+}
+
+// CHECK-LABEL: @erf32_vector
+// CHECK-NOT: math.erf
+// CHECK: %[[ERF_CALL:.*]] = call @local_xla.erf.v4f32
+// CHECK: return %[[ERF_CALL]]
+
+// -----
+
+module {
   func.func @erf64(%arg0: f64) -> f64 {
     %ret = math.erf %arg0 : f64
     return %ret : f64
@@ -92,6 +121,19 @@ module {
 // CHECK: %[[ERF_CALL:.*]] = call @erf
 // CHECK: return %[[ERF_CALL]]
 
+
+// -----
+
+module {
+  func.func @erf64_vector(%arg0: vector<4xf64>) -> vector<4xf64> {
+    %ret = math.erf %arg0 : vector<4xf64>
+    return %ret : vector<4xf64>
+  }
+}
+
+// CHECK-LABEL: @erf64_vector
+// CHECK-NOT: math.erf
+// CHECK-COUNT-4: call @erf
 
 // -----
 
