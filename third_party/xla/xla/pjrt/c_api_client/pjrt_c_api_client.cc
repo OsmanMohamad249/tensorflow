@@ -60,6 +60,7 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_phase_compile_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_profiler_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_stream_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_tpu_topology_extension.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_phase_compiler.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/extensions/cross_host_transfers/pjrt_c_api_cross_host_transfers_extension.h"
@@ -3177,6 +3178,8 @@ PjRtCApiTopologyDescription::PjRtCApiTopologyDescription(
     const PJRT_Api* c_api, PJRT_TopologyDescription* c_topology, bool owned)
     : compiler_(std::make_unique<PjRtCApiCompiler>(c_api)),
       c_api_(c_api),
+      tpu_topology_extension_(pjrt::FindExtension<PJRT_TpuTopology_Extension>(
+          c_api, PJRT_Extension_Type::PJRT_Extension_Type_TpuTopology)),
       c_topology_(c_topology),
       platform_name_(::pjrt::PlatformName(c_api, c_topology)),
       platform_id_(tsl::Fingerprint64(platform_name_)) {
@@ -3297,6 +3300,40 @@ void PjRtCApiTopologyDescription::InitAttributes() {
                             c_api_);
   attributes_ =
       pjrt::ConvertFromPjRtNamedValueList(args.attributes, args.num_attributes);
+}
+
+absl::StatusOr<std::unique_ptr<PjRtTopologyDescription>>
+PjRtCApiTopologyDescription::Subslice(
+    const PjRtDeviceDimensions& chips_per_host_bounds,
+    const PjRtDeviceDimensions& host_bounds) const {
+  if (tpu_topology_extension_ == nullptr) {
+    return Unimplemented("Subslice is not supported by the PJRT C API.");
+  }
+  PJRT_TpuTopology_Subslice_Args args;
+  args.struct_size = PJRT_TpuTopology_Subslice_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.topology = c_topology_;
+  args.chips_per_host_bounds = chips_per_host_bounds.data();
+  args.chips_per_host_bounds_num_dims = chips_per_host_bounds.size();
+  args.host_bounds = host_bounds.data();
+  args.host_bounds_num_dims = host_bounds.size();
+  args.subslice_topology = nullptr;
+  RETURN_STATUS_IF_PJRT_ERROR(tpu_topology_extension_->subslice(&args), c_api_);
+  return std::make_unique<PjRtCApiTopologyDescription>(c_api_,
+                                                       args.subslice_topology,
+                                                       /*owned=*/true);
+}
+
+bool PjRtCApiTopologyDescription::is_subslice_topology() const {
+  CHECK(tpu_topology_extension_ != nullptr)
+      << "Subslice is not supported by the PJRT C API.";
+  PJRT_TpuTopology_IsSubsliceTopology_Args args;
+  args.struct_size = PJRT_TpuTopology_IsSubsliceTopology_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.topology = c_topology_;
+  pjrt::LogFatalIfPjrtError(
+      tpu_topology_extension_->is_subslice_topology(&args), c_api_);
+  return args.is_subslice_topology;
 }
 
 // Initializes `PJRT_Compile_Args`, which will be used to call
