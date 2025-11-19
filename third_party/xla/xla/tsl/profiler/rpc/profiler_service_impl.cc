@@ -17,10 +17,11 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <variant>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_replace.h"
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/support/status.h"
 #include "xla/tsl/platform/env.h"
@@ -28,10 +29,9 @@ limitations under the License.
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/macros.h"
-#include "xla/tsl/platform/status.h"
 #include "xla/tsl/profiler/rpc/client/save_profile.h"
-#include "xla/tsl/profiler/utils/file_system_utils.h"
 #include "xla/tsl/profiler/utils/math_utils.h"
+#include "xla/tsl/profiler/utils/profiler_options_util.h"
 #include "xla/tsl/profiler/utils/time_utils.h"
 #include "xla/tsl/profiler/utils/xplane_utils.h"
 #include "tsl/profiler/lib/profiler_session.h"
@@ -68,8 +68,18 @@ absl::Status CollectData(const ProfileRequest& request,
     return absl::OkStatus();
   }
 
-  return SaveXSpace(request.repository_root(), request.session_id(),
-                    request.host_name(), xspace);
+  std::string hostname = request.host_name();
+  if (auto hostname_override =
+          GetConfigValue(request.opts(), "override_hostname")) {
+    if (const std::string* hostname_str =
+            std::get_if<std::string>(&*hostname_override);
+        hostname_str && !hostname_str->empty()) {
+      hostname = *hostname_str;
+    }
+  }
+
+  return SaveXSpace(request.repository_root(), request.session_id(), hostname,
+                    xspace);
 }
 
 class ProfilerServiceImpl : public tensorflow::grpc::ProfilerService::Service {

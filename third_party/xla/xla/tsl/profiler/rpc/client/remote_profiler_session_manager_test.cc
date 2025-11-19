@@ -21,10 +21,7 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "xla/tsl/platform/errors.h"
-#include "xla/tsl/platform/status.h"
 #include "xla/tsl/platform/test.h"
-#include "xla/tsl/platform/types.h"
 #include "xla/tsl/profiler/rpc/client/profiler_client_test_util.h"
 #include "tsl/profiler/protobuf/profiler_options.pb.h"
 #include "tsl/profiler/protobuf/profiler_service.pb.h"
@@ -159,6 +156,34 @@ TEST(RemoteProfilerSessionManagerTest, LongSession) {
   EXPECT_TRUE(responses.back().profile_response->empty_trace());
   EXPECT_EQ(responses.back().profile_response->tool_data_size(), 0);
   EXPECT_THAT(elapsed, DurationApproxLess(max_duration));
+}
+
+TEST(RemoteProfilerSessionManagerTest, OverrideHostnamesMismatch) {
+  absl::Duration duration = absl::Milliseconds(30);
+  RemoteProfilerSessionManagerOptions options;
+  *options.mutable_profiler_options() = tsl::ProfilerSession::DefaultOptions();
+  options.mutable_profiler_options()->set_duration_ms(
+      absl::ToInt64Milliseconds(duration));
+
+  std::string service_address;
+  auto server = StartServer(duration, &service_address);
+  options.add_service_addresses(service_address);
+  absl::Time approx_start = absl::Now();
+  absl::Duration grace = absl::Seconds(kGracePeriodSeconds);
+  absl::Duration max_duration = duration + grace;
+  options.set_max_session_duration_ms(absl::ToInt64Milliseconds(max_duration));
+  options.set_session_creation_timestamp_ns(absl::ToUnixNanos(approx_start));
+
+  ProfileRequest request =
+      PopulateProfileRequest(TmpDir(), "session_id", service_address, options);
+  (*request.mutable_opts()
+        ->mutable_advanced_configuration())["override_hostnames"]
+      .set_string_value("override1,override2");
+
+  absl::Status status;
+  auto sessions =
+      RemoteProfilerSessionManager::Create(options, request, status);
+  EXPECT_TRUE(absl::IsInvalidArgument(status));
 }
 
 }  // namespace
