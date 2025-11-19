@@ -78,6 +78,7 @@ limitations under the License.
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/cpu_info.h"
+#include "tsl/platform/file_system.h"
 #include "tsl/platform/path.h"
 
 namespace xla {
@@ -208,8 +209,10 @@ class StatelessAutotunerTest : public HloTestBase {
 
     DeviceConfig test_config{backend().default_stream_executor(),
                              backend().memory_allocator()};
-    AutotuneConfig autotune_config = AutotuneConfig::FromDebugOptions(
-        DeviceOrDevicelessConfig{test_config}, debug_options);
+    TF_ASSIGN_OR_RETURN(
+        AutotuneConfig autotune_config,
+        AutotuneConfig::FromDebugOptions(DeviceOrDevicelessConfig{test_config},
+                                         debug_options));
     GemmFusionAutotunerImpl autotuner(autotune_config, toolkit_version,
                                       debug_options, nullptr,
                                       symbolic_expr_context);
@@ -242,8 +245,10 @@ class StatelessAutotunerTest : public HloTestBase {
   GetPossibleMatmulAutotuneConfigs(const HloModule& module) {
     DeviceConfig device_config{backend().default_stream_executor(),
                                backend().memory_allocator()};
-    AutotuneConfig autotune_config = AutotuneConfig::FromDebugOptions(
-        DeviceOrDevicelessConfig{device_config}, GetDebugOptionsForTest());
+    TF_ASSIGN_OR_RETURN(
+        AutotuneConfig autotune_config,
+        AutotuneConfig::FromDebugOptions(
+            DeviceOrDevicelessConfig{device_config}, GetDebugOptionsForTest()));
     GemmFusionAutotunerImpl autotuner(autotune_config, GetToolkitVersion(),
                                       GetDebugOptionsForTest(), nullptr,
                                       &symbolic_expr_context_);
@@ -377,14 +382,14 @@ class GemmFusionAutotunerTest : public StatelessAutotunerTest {
                                         tsl::port::MaxParallelism());
     DebugOptions opts;
     MultiProcessKeyValueStore key_value_store;
-    pipeline.AddPass<GemmFusionAutotuner>(
-        AutotuneConfig::FromDebugOptions(
-            DeviceOrDevicelessConfig{
-                DeviceConfig{backend().default_stream_executor(),
-                             backend().memory_allocator()}},
-            opts),
-        GetToolkitVersion(), &thread_pool, key_value_store,
-        &symbolic_expr_context_);
+    absl::StatusOr<AutotuneConfig> config = AutotuneConfig::FromDebugOptions(
+        DeviceOrDevicelessConfig{DeviceConfig{
+            backend().default_stream_executor(), backend().memory_allocator()}},
+        opts);
+    CHECK_OK(config.status());
+    pipeline.AddPass<GemmFusionAutotuner>(*config, GetToolkitVersion(),
+                                          &thread_pool, key_value_store,
+                                          &symbolic_expr_context_);
 
     RunAndFilecheckHloRewrite(
         hlo, std::move(pipeline), expected, [](const HloModule* m) {
@@ -434,8 +439,10 @@ GetPossibleMatmulAutotuneTritonConfigs(
   device_description.set_threads_per_warp(32);
   device_description.set_shared_memory_per_block_optin(227 * 1024);
   DevicelessConfig test_config = {device_description};
-  AutotuneConfig autotune_config = AutotuneConfig::FromDebugOptions(
-      DeviceOrDevicelessConfig{test_config}, debug_options);
+  TF_ASSIGN_OR_RETURN(
+      AutotuneConfig autotune_config,
+      AutotuneConfig::FromDebugOptions(DeviceOrDevicelessConfig{test_config},
+                                       debug_options));
   GemmFusionAutotunerImpl autotuner(autotune_config, toolkit_version,
                                     debug_options, nullptr,
                                     symbolic_expr_context);
@@ -799,10 +806,12 @@ ENTRY main {
                           ParseAndReturnVerifiedModule(kHloText));
 
   DebugOptions opts;
-  AutotuneConfig autotune_config = AutotuneConfig::FromDebugOptions(
-      DeviceOrDevicelessConfig{DeviceConfig{backend().default_stream_executor(),
-                                            backend().memory_allocator()}},
-      opts);
+  TF_ASSERT_OK_AND_ASSIGN(
+      AutotuneConfig autotune_config,
+      AutotuneConfig::FromDebugOptions(DeviceOrDevicelessConfig{DeviceConfig{
+                                           backend().default_stream_executor(),
+                                           backend().memory_allocator()}},
+                                       opts));
   AutotuneCacheKey cache_key(autotune_config.GetDeviceDescription(),
                              *module->entry_computation()->root_instruction());
 
@@ -1045,13 +1054,15 @@ ENTRY e {
                                       tsl::port::MaxParallelism());
   DebugOptions opts;
   MultiProcessKeyValueStore key_value_store;
-  pipeline.AddPass<GemmFusionAutotuner>(
+  TF_ASSERT_OK_AND_ASSIGN(
+      AutotuneConfig config,
       AutotuneConfig::FromDebugOptions(
           DeviceOrDevicelessConfig{DevicelessConfig{
               backend().default_stream_executor()->GetDeviceDescription()}},
-          opts),
-      GetToolkitVersion(), &thread_pool, key_value_store,
-      &symbolic_expr_context_);
+          opts));
+  pipeline.AddPass<GemmFusionAutotuner>(config, GetToolkitVersion(),
+                                        &thread_pool, key_value_store,
+                                        &symbolic_expr_context_);
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(hlo));
@@ -1185,8 +1196,10 @@ TEST_F(GemmFusionAutotunerTest, SplitKFLoatNormalization) {
   ccc->set_minor(compute_capability.minor);
   DeviceConfig test_config{backend().default_stream_executor(),
                            backend().memory_allocator()};
-  AutotuneConfig autotune_config = AutotuneConfig::FromDebugOptions(
-      DeviceOrDevicelessConfig{test_config}, GetDebugOptionsForTest());
+  TF_ASSERT_OK_AND_ASSIGN(
+      AutotuneConfig autotune_config,
+      AutotuneConfig::FromDebugOptions(DeviceOrDevicelessConfig{test_config},
+                                       GetDebugOptionsForTest()));
   GemmFusionAutotunerImpl autotuner(autotune_config, GetToolkitVersion(),
                                     GetDebugOptionsForTest(), nullptr,
                                     &symbolic_expr_context_);
@@ -1497,9 +1510,11 @@ class GemmFusionShardedAutotunerTest : public GemmFusionAutotunerTest {
  protected:
   AutotuneConfig GetAutotuneConfigForTest() const {
     return AutotuneConfig::FromDebugOptions(
-        DeviceOrDevicelessConfig{DeviceConfig{
-            backend().default_stream_executor(), backend().memory_allocator()}},
-        GetDebugOptionsForTest());
+               DeviceOrDevicelessConfig{
+                   DeviceConfig{backend().default_stream_executor(),
+                                backend().memory_allocator()}},
+               GetDebugOptionsForTest())
+        .value();
   }
 
   GemmFusionAutotuner GemmFusionAutotunerForKeyValueStore(
@@ -1679,10 +1694,12 @@ TEST_F(GemmFusionAutotunerTest, RewritesGemmFusionToCustomKernelFusion) {
       ParseAndReturnVerifiedModule(kHlo).value();
 
   DebugOptions opts;
-  AutotuneConfig autotune_config = AutotuneConfig::FromDebugOptions(
-      DeviceOrDevicelessConfig{DeviceConfig{backend().default_stream_executor(),
-                                            backend().memory_allocator()}},
-      opts);
+  TF_ASSERT_OK_AND_ASSIGN(
+      AutotuneConfig autotune_config,
+      AutotuneConfig::FromDebugOptions(DeviceOrDevicelessConfig{DeviceConfig{
+                                           backend().default_stream_executor(),
+                                           backend().memory_allocator()}},
+                                       opts));
   AutotuneCacheKey cache_key(autotune_config.GetDeviceDescription(),
                              *module->entry_computation()->root_instruction());
   TF_ASSERT_OK_AND_ASSIGN(AutotuneResults autotune_results_override,
@@ -1938,6 +1955,56 @@ TEST_F(GemmFusionAutotunerEnableTma, TmaRunCorrectlyForDotsOfBroadcasts) {
   EXPECT_TRUE(RunAndCompare(std::move(module),
                             ErrorSpec{/*aabs=*/5e-3, /*arel=*/5e-3}));
 }
+
+TEST_F(GemmFusionAutotunerTest, ReadsOverrideFile) {
+  if (GpuComputeComp().IsRocm()) {
+    GTEST_SKIP() << "Not supported on ROCm.";
+  }
+  std::string output_directory;
+  if (!tsl::io::GetTestUndeclaredOutputsDir(&output_directory)) {
+    output_directory = tsl::testing::TmpDir();
+  }
+  const std::string override_file =
+      tsl::io::JoinPath(output_directory, "override.textproto");
+  // Block M 126 is not really a valid config, but allows us to check that the
+  // override file was used.
+  TF_ASSERT_OK(tsl::WriteStringToFile(tsl::Env::Default(), override_file,
+                                      R"pb(config {
+                                             block_m: 126
+                                             block_n: 32
+                                             block_k: 16
+                                             split_k: 1
+                                             num_stages: 1
+                                             num_warps: 32
+                                             num_ctas: 1
+                                           })pb"));
+
+  DebugOptions debug_options = GetDebugOptionsForTest();
+  debug_options.set_xla_gpu_gemm_autotuner_override_file(override_file);
+
+  std::unique_ptr<VerifiedHloModule> module = ParseAndReturnVerifiedModule(R"(
+    ENTRY e {
+      p0 = f32[64,64] parameter(0)
+      p1 = f32[64,64] parameter(1)
+      ROOT r = f32[64,64] dot(p0, p1),
+        lhs_contracting_dims={1}, rhs_contracting_dims={0}
+    })")
+                                                  .value();
+
+  const se::CudaComputeCapability compute_capability{
+      se::CudaComputeCapability::kAmpere, /*minor=*/0};
+  TF_ASSERT_OK_AND_ASSIGN(
+      const std::vector<TritonGemmConfig> configs,
+      GetPossibleMatmulAutotuneTritonConfigs(
+          *Cast<HloDotInstruction>(
+              module->entry_computation()->root_instruction()),
+          compute_capability, GetToolkitVersion(), debug_options,
+          &symbolic_expr_context_));
+  EXPECT_TRUE(std::any_of(
+      configs.begin(), configs.end(),
+      [](const TritonGemmConfig& config) { return config.block_m == 126; }));
+}
+
 }  // namespace
 }  // namespace gpu
 }  // namespace xla
