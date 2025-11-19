@@ -764,6 +764,15 @@ absl::StatusOr<std::unique_ptr<PjRtBuffer>> TfrtGpuBuffer::CopyToMemorySpace(
         /*device_layout=*/nullptr);
   }
 
+  // If the source buffer is poisoned, return the error.
+  {
+    absl::MutexLock lock(mu_);
+    if (tracked_device_buffer_ &&
+        tracked_device_buffer_->definition_event().IsError()) {
+      return tracked_device_buffer_->definition_event().GetError();
+    }
+  }
+
   // Copy each leaf buffer to a destination buffer.
   auto src_usage_event = tsl::MakeConstructedAsyncValueRef<GpuEvent>();
   TrackedGpuDeviceBuffer* src_device_buffer = AcquireUsage(src_usage_event);
